@@ -12,7 +12,7 @@ from sklearn.model_selection import StratifiedKFold
 
 def load_pickle(file_path):
     try:
-        from compress_pickle import load as compress_pickle_load
+        from compress_pickle import load as compress_pickle_load  # pyright: ignore[reportMissingImports]
     except ModuleNotFoundError:
         compress_pickle_load = None
 
