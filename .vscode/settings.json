@@ -1,3 +1,21 @@
 {
-    "python-envs.defaultEnvManager": "ms-python.python:system"
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "files.exclude": {
+        "**/data": true,
+        "**/results": true,
+        "**/.venv": true,
+        "**/venv": true
+    },
+    "search.exclude": {
+        "**/data": true,
+        "**/results": true,
+        "**/.venv": true,
+        "**/venv": true
+    },
+    "files.watcherExclude": {
+        "**/data/**": true,
+        "**/results/**": true,
+        "**/.venv/**": true,
+        "**/venv/**": true
+    }
 }
