@@ -10,6 +10,13 @@ import pickle
 from pathlib import Path
 from sklearn.model_selection import StratifiedKFold
 
+try:
+    import pyarrow as pa  # type: ignore[reportMissingImports]
+    import pyarrow.dataset as pa_ds  # type: ignore[reportMissingImports]
+except ModuleNotFoundError:
+    pa = None
+    pa_ds = None
+
 def load_pickle(file_path):
     try:
         from compress_pickle import load as compress_pickle_load  # pyright: ignore[reportMissingImports]
@@ -21,6 +28,25 @@ def load_pickle(file_path):
 
     with open(file_path, "rb") as file_handle:
         return pickle.load(file_handle)
+
+
+def _normalize_before_after_label(value) -> int:
+    if pd.isna(value):
+        raise ValueError("before_after 标签存在空值。")
+
+    if isinstance(value, (np.integer, int)):
+        numeric_value = int(value)
+        if numeric_value in (0, 1):
+            return numeric_value
+        raise ValueError(f"不支持的数值标签: {value}")
+
+    text_value = str(value).strip().lower()
+    if text_value in {"1", "before", "pre", "prior"}:
+        return 1
+    if text_value in {"0", "after", "same", "post"}:
+        return 0
+
+    raise ValueError(f"不支持的 before_after 标签值: {value}")
 
 class AviationDataPreprocessor:
     def __init__(self):
@@ -115,6 +141,7 @@ def load_local_subset_data(
     base_dir: Path | None = None,
     label_column: str = "before_after",
     max_length: int = 4096,
+    max_samples: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
     """
     从本地 data/subset_data 读取 NGAFID 子集，并构造成预处理所需的三维张量。
@@ -138,20 +165,164 @@ def load_local_subset_data(
     if not sample_ids:
         raise ValueError("flight_header.csv 中的索引在 flight_data.pkl 中都未找到。")
 
+    if max_samples is not None and max_samples > 0 and len(sample_ids) > max_samples:
+        rng = np.random.default_rng(42)
+        sample_ids = list(rng.choice(sample_ids, size=max_samples, replace=False))
+        print(f"样本量过大，已按固定随机种子下采样到 {len(sample_ids)} 条用于训练。")
+
     first_sample = np.asarray(flight_data_dict[sample_ids[0]], dtype=np.float32)
     feature_count = first_sample.shape[1]
     max_length = min(max_length, max(np.asarray(flight_data_dict[index]).shape[0] for index in sample_ids))
 
     X = np.zeros((len(sample_ids), max_length, feature_count), dtype=np.float32)
-    y = np.zeros(len(sample_ids), dtype=flight_header_df[label_column].to_numpy().dtype)
+    y = np.zeros(len(sample_ids), dtype=np.int64)
 
     for i, index in enumerate(sample_ids):
         sample_array = np.asarray(flight_data_dict[index], dtype=np.float32)
         sample_array = sample_array[-max_length:, :feature_count]
         X[i, : sample_array.shape[0], :] = sample_array
-        y[i] = flight_header_df.loc[index, label_column]
+        y[i] = _normalize_before_after_label(flight_header_df.loc[index, label_column])
 
     return X, y, flight_header_df.loc[sample_ids]
+
+
+def _resolve_all_flights_dir(base_dir: Path | None = None) -> Path:
+    project_root = Path(base_dir).resolve() if base_dir is not None else Path(__file__).resolve().parent.parent
+    candidates = [
+        project_root / "data" / "subset_data" / "all_flights",
+        project_root / "data" / "subset_data" / "all_flight" / "all_flights",
+    ]
+
+    for candidate in candidates:
+        if candidate.exists() and (candidate / "flight_header.csv").exists() and (candidate / "one_parq").exists():
+            return candidate
+
+    raise FileNotFoundError("未找到 all_flights 数据目录，请先下载并解压 all_flights 到 data/subset_data。")
+
+
+def load_all_flights_data(
+    base_dir: Path | None = None,
+    label_column: str = "before_after",
+    max_length: int = 1024,
+    max_samples: int = 300,
+) -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
+    """
+    从 all_flights/one_parq 构建训练张量。
+    说明：该过程成本较高，默认进行采样以避免内存和CPU过载。
+    """
+    all_flights_dir = _resolve_all_flights_dir(base_dir=base_dir)
+    header_path = all_flights_dir / "flight_header.csv"
+    one_parq_path = all_flights_dir / "one_parq"
+
+    header_df = pd.read_csv(header_path, index_col="Master Index")
+    if label_column not in header_df.columns:
+        raise KeyError(f"all_flights 缺少标签列: {label_column}")
+
+    sample_ids = list(header_df.index)
+    if max_samples > 0 and len(sample_ids) > max_samples:
+        rng = np.random.default_rng(42)
+        sample_ids = list(rng.choice(sample_ids, size=max_samples, replace=False))
+
+    if pa_ds is None or pa is None:
+        raise RuntimeError("缺少 pyarrow，无法按需读取 all_flights parquet。")
+
+    dataset = pa_ds.dataset(str(one_parq_path), format="parquet")
+    schema_names = dataset.schema.names
+
+    if "Master Index" in schema_names:
+        id_col = "Master Index"
+    elif "Index" in schema_names:
+        id_col = "Index"
+    else:
+        id_col = None
+
+    if id_col is None:
+        raise ValueError("all_flights parquet 中找不到 flight id 列。")
+
+    time_col = "timestep" if "timestep" in schema_names else None
+    excluded_cols = {id_col, "timestep", label_column}
+    feature_cols = []
+    for field in dataset.schema:
+        if field.name in excluded_cols:
+            continue
+        if pa.types.is_integer(field.type) or pa.types.is_floating(field.type):
+            feature_cols.append(field.name)
+
+    if not feature_cols:
+        raise ValueError("all_flights parquet 中未找到可用数值特征列。")
+
+    selected_columns = [id_col]
+    if time_col is not None:
+        selected_columns.append(time_col)
+    selected_columns.extend(feature_cols)
+
+    try:
+        table = dataset.to_table(
+            filter=pa_ds.field(id_col).isin(sample_ids),
+            columns=selected_columns,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"读取 all_flights parquet 失败: {exc}") from exc
+
+    if table.num_rows == 0:
+        raise ValueError("all_flights parquet 过滤后为空，无法构建训练数据。")
+
+    working_df = table.to_pandas()
+    grouped = working_df.groupby(id_col, sort=False)
+    usable_ids = [fid for fid in sample_ids if fid in grouped.groups]
+    if not usable_ids:
+        raise ValueError("all_flights 中找不到与 flight_header 对应的航班序列。")
+
+    X = np.zeros((len(usable_ids), max_length, len(feature_cols)), dtype=np.float32)
+    y = np.zeros(len(usable_ids), dtype=np.int64)
+
+    for i, fid in enumerate(usable_ids):
+        flight_df = grouped.get_group(fid)
+        if time_col is not None:
+            flight_df = flight_df.sort_values(time_col)
+        arr = flight_df[feature_cols].to_numpy(dtype=np.float32)
+        arr = arr[-max_length:, :]
+        X[i, :arr.shape[0], :] = arr
+        y[i] = _normalize_before_after_label(header_df.loc[fid, label_column])
+
+    return X, y, header_df.loc[usable_ids]
+
+
+def load_combined_training_data(
+    base_dir: Path | None = None,
+    label_column: str = "before_after",
+    max_length: int = 1024,
+    max_samples_2days: int = 1500,
+    max_samples_all_flights: int = 300,
+) -> tuple[np.ndarray, np.ndarray]:
+    """同时读取 2days 和 all_flights，并拼接为统一训练集。"""
+    X_2days, y_2days, _ = load_local_subset_data(
+        subset_name="2days",
+        base_dir=base_dir,
+        label_column=label_column,
+        max_length=max_length,
+        max_samples=max_samples_2days,
+    )
+
+    X_all, y_all, _ = load_all_flights_data(
+        base_dir=base_dir,
+        label_column=label_column,
+        max_length=max_length,
+        max_samples=max_samples_all_flights,
+    )
+
+    feature_count = min(X_2days.shape[2], X_all.shape[2])
+    if X_2days.shape[2] != X_all.shape[2]:
+        print(f"特征维度不一致，按最小公共维度裁剪: 2days={X_2days.shape[2]}, all_flights={X_all.shape[2]}, used={feature_count}")
+
+    X_merged = np.concatenate([
+        X_2days[:, :, :feature_count],
+        X_all[:, :, :feature_count],
+    ], axis=0)
+    y_merged = np.concatenate([y_2days.astype(np.int64), y_all.astype(np.int64)], axis=0)
+
+    print(f"合并数据完成: 2days={X_2days.shape[0]} 条, all_flights={X_all.shape[0]} 条, total={X_merged.shape[0]} 条")
+    return X_merged, y_merged
 
 
 def format_labels(y_raw: np.ndarray) -> np.ndarray:

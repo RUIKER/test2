@@ -1,9 +1,9 @@
 """
 航空预见性维护项目 - 自动化全流程入口
 """
+import os
 import sys
 import traceback
-import numpy as np
 from pathlib import Path
 
 # 将 src 目录动态加入环境变量，确保兼容所有操作系统
@@ -11,33 +11,25 @@ current_dir = Path(__file__).resolve().parent
 sys.path.append(str(current_dir / "src"))
 
 from data_downloader import extract_and_download_subset
+from data_preprocessor import load_local_subset_data, format_labels
 from train_evaluate import train_and_evaluate
 
-def load_data(data_dir: Path):
+def load_data(project_root: Path):
     """
     数据加载中枢：
-    扫描下载目录下的特征文件。为了保证整个流水线无论如何都能跑通测试，
-    这里预留了真实数据的加载接口。如果尚未解析出正确的 NumPy 切片，
-    系统会自动降级生成高仿真的 Dummy Data 供流水线验证。
+    读取本地子集数据（首次运行会先触发自动下载）。
     """
-    print(f"正在扫描 {data_dir} 下的物理数据文件...")
-    npy_files = list(data_dir.glob("*.npy"))
-    npz_files = list(data_dir.glob("*.npz"))
-    
-    if npy_files or npz_files:
-        print(f"检测到 {len(npy_files) + len(npz_files)} 个数据文件。")
-        print("注意: 真实数据的拼接(X_train, y_train等)需根据具体文件名加载。")
-        print("当前进入预设的 Pipeline 兼容测试模式...\n")
-        
-    print("生成并加载高仿真测试数据集 (格式: [样本数, 4096, 23])...")
-    num_samples = 200 
-    np.random.seed(42)
-    # 模拟 200个航班, 4096个时间步, 23个传感器维度
-    X = np.random.randn(num_samples, 4096, 23)
-    # 注入 NaN 以测试预处理模块的线性插值防泄漏逻辑
-    X[1, 100:200, 5] = np.nan 
-    # 模拟二元标签 (0:健康, 1:故障前)
-    y = np.random.randint(0, 2, num_samples)
+    max_length = int(os.environ.get("PM_MAX_LENGTH", "4096"))
+
+    print("正在读取本地数据: 2days ...")
+    print(f"加载参数: max_length={max_length}, max_samples=全量")
+    X, y, _ = load_local_subset_data(
+        base_dir=project_root,
+        label_column="before_after",
+        max_length=max_length,
+    )
+    y = format_labels(y)
+    print(f"数据加载完成: X={X.shape}, y={y.shape}")
     return X, y
 
 def main():
@@ -52,8 +44,7 @@ def main():
         
         # [步骤 2] 加载时间序列数据
         print("\n>>> [阶段 2/3] 加载多变量时间序列数据...")
-        data_dir = current_dir / "data" / "subset_data"
-        X, y = load_data(data_dir)
+        X, y = load_data(current_dir)
         
         # [步骤 3] 严格防泄露的 5 折交叉验证与模型训练
         print("\n>>> [阶段 3/3] 启动 MiniRocket 模型训练与性能评估...")
@@ -72,9 +63,9 @@ def main():
         traceback.print_exc()
         print("=" * 60)
         print("【💡 错误排查指南】")
-        print("1. 如果是 gdown/ImportError 报错：请确认是否已执行 `pip install -r requirements.txt`。")
-        print("2. 如果是 gdown 下载失败：请检查当前网络是否能稳定访问 Google Drive。")
-        print("3. 如果是 FileNotFoundError：请确认 `test2/data/NGAFID_DATASET_TF_EXAMPLE.ipynb` 文件真实存在。")
+        print("1. 如果是依赖报错：请确认是否已执行 `pip install -r requirements.txt`。")
+        print("2. 如果是下载失败：请检查当前网络是否可访问 Zenodo/Google Drive。")
+        print("3. 如果是数据读取失败：请确认 `data/subset_data` 下存在 2days 数据。")
 
 if __name__ == "__main__":
     main()
