@@ -90,8 +90,7 @@ def train_and_evaluate(X: np.ndarray, y: np.ndarray):
     except Exception as exc:
         raise TypeError(f"标签必须是可转为整数的数值类型，当前 dtype={y.dtype}") from exc
 
-    fast_mode = os.environ.get("PM_FAST_MODE", "0") == "1"
-    n_splits = int(os.environ.get("PM_N_SPLITS", "3" if fast_mode else "5"))
+    n_splits = 5
 
     setup_matplotlib()
 

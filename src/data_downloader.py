@@ -270,9 +270,15 @@ def extract_and_download_subset(dataset_names: tuple[str, ...] = DEFAULT_DATASET
     repo_dir = project_root / "data"
     notebook_path = repo_dir / "NGAFID_DATASET_TF_EXAMPLE.ipynb"
 
+    named_ids: dict[str, str] = {}
     file_ids: list[str] = []
     if notebook_path.exists():
         file_ids = _extract_file_ids_from_notebook(notebook_path)
+
+    if file_ids:
+        # Notebook 中若只有单个下载链接，按 2days 处理（当前默认任务）。
+        if len(file_ids) == 1:
+            named_ids["2days"] = file_ids[0]
 
     if not file_ids:
         dataset_py_path = project_root / "data" / "ngafiddataset" / "dataset" / "dataset.py"
