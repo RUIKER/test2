@@ -155,13 +155,26 @@ def _find_dataset_root(download_dir: Path, dataset_name: str) -> Path | None:
 
 
 def _extract_archive(archive_path: Path, destination: Path):
+    destination = destination.resolve()
+
+    def _assert_safe_member(member_name: str):
+        target_path = (destination / member_name).resolve()
+        try:
+            target_path.relative_to(destination)
+        except ValueError as exc:
+            raise RuntimeError(f"检测到不安全解压路径: {member_name}") from exc
+
     lower_name = archive_path.name.lower()
     if lower_name.endswith((".tar.gz", ".tgz", ".tar")):
         with tarfile.open(archive_path, "r:*") as tar_file:
+            for member in tar_file.getmembers():
+                _assert_safe_member(member.name)
             tar_file.extractall(destination)
         return
     if lower_name.endswith(".zip"):
         with zipfile.ZipFile(archive_path, "r") as zip_file:
+            for member in zip_file.infolist():
+                _assert_safe_member(member.filename)
             zip_file.extractall(destination)
         return
     raise ValueError(f"不支持的压缩格式: {archive_path.name}")

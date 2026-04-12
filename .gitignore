@@ -5,6 +5,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .numba_cache/
+**/.numba_cache/
 .pytest_cache/
 
 -----------------------------
@@ -21,6 +22,7 @@ ENV/
 -----------------------------
 忽略整个 data 目录 (避免上传大型.npy 矩阵或 Notebook)
 data/
+*.pkl
 
 忽略模型评估生成的图表和日志
 results/

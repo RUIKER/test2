@@ -6,23 +6,6 @@ import sys
 import traceback
 from pathlib import Path
 
-
-def validate_python_version() -> None:
-    """Ensure runtime version is compatible with sktime/numba dependencies."""
-    min_supported = (3, 10)
-    max_supported_exclusive = (3, 13)
-    current = sys.version_info[:3]
-
-    if current < min_supported or current >= max_supported_exclusive:
-        version_str = ".".join(str(v) for v in current)
-        raise RuntimeError(
-            "当前 Python 版本不受支持: "
-            f"{version_str}。请使用 Python 3.10-3.12（推荐 3.11）后重试。"
-        )
-
-
-validate_python_version()
-
 # 将 src 目录动态加入环境变量，确保兼容所有操作系统
 current_dir = Path(__file__).resolve().parent
 sys.path.append(str(current_dir / "src"))
@@ -40,14 +23,14 @@ def load_data(project_root: Path):
 
     print("正在读取本地数据: 2days ...")
     print(f"加载参数: max_length={max_length}, max_samples=全量")
-    X, y, _ = load_local_subset_data(
+    X, y, flight_header_df = load_local_subset_data(
         base_dir=project_root,
         label_column="before_after",
         max_length=max_length,
     )
     y = format_labels(y)
     print(f"数据加载完成: X={X.shape}, y={y.shape}")
-    return X, y
+    return X, y, flight_header_df
 
 def main():
     print("=" * 60)
@@ -61,11 +44,15 @@ def main():
         
         # [步骤 2] 加载时间序列数据
         print("\n>>> [阶段 2/3] 加载多变量时间序列数据...")
-        X, y = load_data(current_dir)
+        X, y, flight_header_df = load_data(current_dir)
+
+        fold_ids = None
+        if "fold" in flight_header_df.columns:
+            fold_ids = flight_header_df["fold"].to_numpy()
         
         # [步骤 3] 严格防泄露的 5 折交叉验证与模型训练
         print("\n>>> [阶段 3/3] 启动 MiniRocket 模型训练与性能评估...")
-        train_and_evaluate(X, y)
+        train_and_evaluate(X, y, fold_ids=fold_ids)
         
         print("\n" + "=" * 60)
         print("✅ 全流程执行完毕！请前往 `results/` 目录查看：")

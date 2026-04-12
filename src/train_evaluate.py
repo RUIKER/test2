@@ -8,6 +8,7 @@
 import os
 import time
 import platform
+from typing import Iterable
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -16,6 +17,7 @@ import pandas as pd
 from sklearn.linear_model import RidgeClassifierCV
 from sklearn.metrics import accuracy_score, auc, confusion_matrix, f1_score, roc_auc_score, roc_curve
 from sklearn.model_selection import StratifiedKFold
+from tqdm.auto import tqdm
 
 
 def setup_numba_cache_dir():
@@ -51,10 +53,21 @@ class FoldPreprocessor:
         self.mean_ = None
         self.std_ = None
 
-    def fill_missing(self, X: np.ndarray) -> np.ndarray:
+    def fill_missing(self, X: np.ndarray, progress_desc: str | None = None) -> np.ndarray:
         """特征维度时间序列线性插值 (独立对每个样本进行，不产生泄露)"""
         X_filled = np.empty_like(X)
-        for i in range(X.shape[0]):
+        sample_iter = range(X.shape[0])
+        if progress_desc is not None:
+            sample_iter = tqdm(
+                sample_iter,
+                total=X.shape[0],
+                desc=progress_desc,
+                unit="sample",
+                leave=False,
+                dynamic_ncols=True,
+            )
+
+        for i in sample_iter:
             df = pd.DataFrame(X[i])
             df.interpolate(method="linear", limit_direction="both", inplace=True)
             df.fillna(0, inplace=True)
@@ -73,8 +86,39 @@ class FoldPreprocessor:
         return (X_test - self.mean_) / self.std_
 
 
+def _build_cv_splits(
+    X: np.ndarray,
+    y: np.ndarray,
+    fold_ids: np.ndarray | None,
+    random_seed: int,
+) -> tuple[int, Iterable[tuple[np.ndarray, np.ndarray]], str]:
+    """优先使用数据头表中的固定 fold 划分，缺失时回退到分层随机划分。"""
+    if fold_ids is None:
+        n_splits = 5
+        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_seed)
+        return n_splits, skf.split(X, y), "StratifiedKFold(shuffle=True)"
+
+    fold_ids = np.asarray(fold_ids)
+    if fold_ids.shape[0] != X.shape[0]:
+        raise ValueError(f"fold_ids 长度与样本数不一致: fold_ids={fold_ids.shape[0]}, X={X.shape[0]}")
+
+    unique_folds = np.unique(fold_ids)
+    if unique_folds.shape[0] < 2:
+        raise ValueError("fold 列至少需要包含 2 个不同取值。")
+
+    splits: list[tuple[np.ndarray, np.ndarray]] = []
+    for fold_value in np.sort(unique_folds):
+        test_idx = np.where(fold_ids == fold_value)[0]
+        train_idx = np.where(fold_ids != fold_value)[0]
+        if test_idx.size == 0 or train_idx.size == 0:
+            raise ValueError(f"fold={fold_value} 划分无效，训练或测试索引为空。")
+        splits.append((train_idx, test_idx))
+
+    return len(splits), splits, "固定 fold 列"
+
+
 # ================= 3. 核心训练与评估流水线 =================
-def train_and_evaluate(X: np.ndarray, y: np.ndarray):
+def train_and_evaluate(X: np.ndarray, y: np.ndarray, fold_ids: np.ndarray | None = None):
     """
     执行交叉验证并保存结果。
     参数:
@@ -90,7 +134,7 @@ def train_and_evaluate(X: np.ndarray, y: np.ndarray):
     except Exception as exc:
         raise TypeError(f"标签必须是可转为整数的数值类型，当前 dtype={y.dtype}") from exc
 
-    n_splits = 5
+    n_splits, cv_splits, cv_desc = _build_cv_splits(X, y, fold_ids, random_seed)
 
     setup_matplotlib()
 
@@ -102,28 +146,43 @@ def train_and_evaluate(X: np.ndarray, y: np.ndarray):
     mean_fpr = np.linspace(0, 1, 100)
     aggregate_cm = np.zeros((2, 2))
 
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_seed)
-
     print(f"数据总形状: X={X.shape}, y={y.shape}")
     print(f"标签分布: {np.bincount(y)}")
+    print(f"交叉验证划分: {cv_desc}")
     print("说明: 第1折通常最慢（MiniRocket/Numba 首次编译），后续折会明显加速。")
     print(f"开始 {n_splits} 折交叉验证 (模型: MiniRocketMultivariate)...\n")
 
     start_total_time = time.time()
 
-    for fold, (train_idx, test_idx) in enumerate(skf.split(X, y)):
-        print(f"[Fold] 正在运行第 {fold + 1} 折交叉验证...")
+    fold_iter = tqdm(
+        cv_splits,
+        total=n_splits,
+        desc="交叉验证总进度",
+        unit="fold",
+        dynamic_ncols=True,
+    )
+
+    for fold, (train_idx, test_idx) in enumerate(fold_iter, start=1):
+        print(f"[Fold] 正在运行第 {fold} 折交叉验证...")
         fold_start = time.time()
+        fold_stage_bar = tqdm(
+            total=4,
+            desc=f"Fold {fold}/{n_splits} 阶段",
+            unit="step",
+            leave=False,
+            dynamic_ncols=True,
+        )
 
         X_train, y_train = X[train_idx], y[train_idx]
         X_test, y_test = X[test_idx], y[test_idx]
 
         preprocessor = FoldPreprocessor()
-        X_train_filled = preprocessor.fill_missing(X_train)
-        X_test_filled = preprocessor.fill_missing(X_test)
+        X_train_filled = preprocessor.fill_missing(X_train, progress_desc=f"Fold {fold}/{n_splits} 训练集插值")
+        X_test_filled = preprocessor.fill_missing(X_test, progress_desc=f"Fold {fold}/{n_splits} 测试集插值")
 
         X_train_scaled = preprocessor.fit_transform(X_train_filled)
         X_test_scaled = preprocessor.transform(X_test_filled)
+        fold_stage_bar.update(1)
         print(f"  - 预处理完成，用时 {time.time() - fold_start:.2f}s")
 
         X_train_sktime = np.transpose(X_train_scaled, (0, 2, 1))
@@ -132,10 +191,12 @@ def train_and_evaluate(X: np.ndarray, y: np.ndarray):
         minirocket = MiniRocketMultivariate(random_state=random_seed)
         X_train_features = minirocket.fit_transform(X_train_sktime)
         X_test_features = minirocket.transform(X_test_sktime)
+        fold_stage_bar.update(1)
         print(f"  - 特征提取完成，用时 {time.time() - fold_start:.2f}s")
 
         classifier = RidgeClassifierCV(alphas=np.logspace(-3, 3, 10))
         classifier.fit(X_train_features, y_train)
+        fold_stage_bar.update(1)
 
         y_pred = classifier.predict(X_test_features)
         y_score = classifier.decision_function(X_test_features)
@@ -154,9 +215,11 @@ def train_and_evaluate(X: np.ndarray, y: np.ndarray):
         interp_tpr[0] = 0.0
         interp_tpr[-1] = 1.0
         tprs.append(interp_tpr)
+        fold_stage_bar.update(1)
+        fold_stage_bar.close()
 
         print(f"  -> 结果: Accuracy={acc:.4f} | F1={f1:.4f} | AUC={auc_score:.4f}")
-        print(f"  - 第 {fold + 1} 折总耗时: {time.time() - fold_start:.2f}s\n")
+        print(f"  - 第 {fold} 折总耗时: {time.time() - fold_start:.2f}s\n")
 
     print("========================================")
     print(f"{n_splits} 折交叉验证全部完成！总耗时: {time.time() - start_total_time:.2f}s")
