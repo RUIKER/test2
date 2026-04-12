@@ -1,0 +1,55 @@
+name: Clean Environment Verification
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  clean-env-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run 5-fold smoke validation on synthetic data
+        env:
+          NUMBA_NUM_THREADS: "2"
+        run: |
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+
+          import numpy as np
+
+          sys.path.append(str(Path.cwd() / "src"))
+          from train_evaluate import train_and_evaluate
+
+          np.random.seed(42)
+          X = np.random.randn(40, 256, 23).astype(np.float32)
+          y = np.random.randint(0, 2, 40).astype(np.int64)
+
+          train_and_evaluate(X, y)
+          print("Clean-environment smoke validation finished.")
+          PY
+
+      - name: Upload smoke result figures
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-results
+          path: results/*.png

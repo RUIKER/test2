@@ -10,6 +10,21 @@ This repository reproduces maintenance event binary detection from the NGAFID da
 
 ## 1. Environment Setup (Clean Environment)
 
+Python version requirement:
+
+- Supported: Python 3.10-3.12
+- Recommended: Python 3.11
+- Not supported: Python 3.14 (some core dependencies do not provide compatible wheels yet)
+
+macOS clean setup example:
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
 ```bash
 pip install -r requirements.txt
 ```
@@ -73,3 +88,29 @@ Dataset source links:
   - `flight_data.pkl`
   - `flight_header.csv`
   - `stats.csv`
+
+## 7. Clean Environment Verification
+
+This repository includes GitHub Actions workflow:
+
+- `.github/workflows/clean-env-verify.yml`
+
+What CI verifies automatically:
+
+1. New clean Ubuntu runner
+2. Python 3.11 setup
+3. `pip install -r requirements.txt`
+4. 5-fold smoke validation using synthetic data
+5. Upload result plots as workflow artifacts
+
+Why smoke data is used in CI:
+
+- Public runners may be unstable for long external dataset downloads.
+- Smoke validation proves dependency completeness and pipeline executability in a clean environment.
+
+For full benchmark reproduction (teacher review):
+
+```bash
+pip install -r requirements.txt
+python main.py
+```

@@ -6,6 +6,23 @@ import sys
 import traceback
 from pathlib import Path
 
+
+def validate_python_version() -> None:
+    """Ensure runtime version is compatible with sktime/numba dependencies."""
+    min_supported = (3, 10)
+    max_supported_exclusive = (3, 13)
+    current = sys.version_info[:3]
+
+    if current < min_supported or current >= max_supported_exclusive:
+        version_str = ".".join(str(v) for v in current)
+        raise RuntimeError(
+            "当前 Python 版本不受支持: "
+            f"{version_str}。请使用 Python 3.10-3.12（推荐 3.11）后重试。"
+        )
+
+
+validate_python_version()
+
 # 将 src 目录动态加入环境变量，确保兼容所有操作系统
 current_dir = Path(__file__).resolve().parent
 sys.path.append(str(current_dir / "src"))
